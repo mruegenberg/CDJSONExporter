@@ -11,12 +11,13 @@
 
 @interface CDJSONExporter : NSObject
 
-+ (CDJSONExporter *)sharedJSONExporter;
-
-+ (NSData *)exportContext:(NSManagedObjectContext *)context;
+// `auxiliary`: a dictionary with values that are stored into the exported JSON as well.
+//              all keys and values should be NSString objects.
++ (NSData *)exportContext:(NSManagedObjectContext *)context auxiliaryInfo:(NSDictionary *)auxiliary;
 
 // import data.
 // `clearContext`: Should the context be cleared before import?
-+ (void)importData:(NSData *)data toContext:(NSManagedObjectContext *)context clear:(BOOL)clearContext;
+// returns YES, if the import was successful and NO otherwise
++ (BOOL)importData:(NSData *)data toContext:(NSManagedObjectContext *)context clear:(BOOL)clearContext;
 
 @end

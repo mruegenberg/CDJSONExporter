@@ -7,6 +7,8 @@
 //
 
 #import "CDJSONExporter.h"
+#import <NSData+Base64/NSData+Base64.h>
+#import "CodingValueTransformer.h"
 
 static NSString *kValueKey = @"Value";
 static NSString *kClassKey = @"Class";
@@ -23,7 +25,7 @@ static NSString *kRelationshipsKey = @"Rels";
 
 @implementation CDJSONExporter
 
-+ (NSData *)exportContext:(NSManagedObjectContext *)context {
++ (NSData *)exportContext:(NSManagedObjectContext *)context auxiliaryInfo:(NSDictionary *)auxiliary {
     // the exported data is a dictionary that maps from entity names to lists/arrays of exported objects.
     // each exported object maps property names to exported values.
     // exported values for most basic attributes are just whatever NSJSONSerialization does with them.
@@ -45,6 +47,7 @@ static NSString *kRelationshipsKey = @"Rels";
             NSArray *properties = [entity properties];
             NSArray *allObjects = ({
                 NSFetchRequest *fetchReq = [NSFetchRequest fetchRequestWithEntityName:[entity name]];
+                fetchReq.includesSubentities = NO; // important
                 [context executeFetchRequest:fetchReq error:nil];
             });
             NSMutableArray *items = [NSMutableArray arrayWithCapacity:[allObjects count]];
@@ -68,6 +71,27 @@ static NSString *kRelationshipsKey = @"Rels";
                                 NSDate *dateVal = (NSDate *)val;
                                 [attrs setValue:@{kValueKey: [NSNumber numberWithInt:[dateVal timeIntervalSinceReferenceDate]],
                                                   kClassKey:[(NSAttributeDescription *)property attributeValueClassName]}
+                                         forKey:[property name]];
+                            }
+#warning Not yet supported in unpacking:
+                            else if(attrType == NSBinaryDataAttributeType) {
+                                NSData *dat = (NSData *)val;
+                                NSString *klassName = [(NSAttributeDescription *)property attributeValueClassName];
+                                if(klassName == nil) klassName = @"NSData"; // FIXME: not tested whether this is needed.
+                                [attrs setValue:@{kValueKey:[dat base64EncodedString],
+                                                  kClassKey:klassName}
+                                         forKey:[property name]];
+                            }
+                            else if(attrType == NSTransformableAttributeType) {
+                                NSValueTransformer *transformer = ({
+                                    NSString *transformerName = [(NSAttributeDescription *)property valueTransformerName];
+                                    (transformerName == nil ?
+                                     [[CodingValueTransformer alloc] init] :
+                                     [NSValueTransformer valueTransformerForName:transformerName]);
+                                });
+                                NSData *transformed = [transformer transformedValue:val];
+                                
+                                [attrs setValue:@{kValueKey:[transformed base64EncodedString]} // a dictionary as value without a value for kClassKey implies a transformed val
                                          forKey:[property name]];
                             }
                             else {
@@ -138,102 +162,190 @@ static NSString *kRelationshipsKey = @"Rels";
             [context reset]; // save memory!
         }
     }
-    return [NSJSONSerialization dataWithJSONObject:data options:NSJSONWritingPrettyPrinted error:nil];
+    
+    for(NSString *key in auxiliary) {
+        [data setObject:[auxiliary objectForKey:key] forKey:[NSString stringWithFormat:@"_%@", key]];
+    }
+    
+    return [NSJSONSerialization dataWithJSONObject:data options:0 error:nil]; // option for debugging: NSJSONWritingPrettyPrinted
 }
 
-+ (void)importData:(NSData *)data toContext:(NSManagedObjectContext *)context clear:(BOOL)clearContext {
++ (BOOL)importData:(NSData *)data toContext:(NSManagedObjectContext *)context clear:(BOOL)clearContext {
+    // TODO: some kind of optional merge facility if `clearContext` == NO
+    //       i.e we want to be able to merge items based on something different than object IDs
+    
+    // set an undo manager in order to be more resilient wrt errors
+    [context setUndoManager:[[NSUndoManager alloc] init]];
+    [context.undoManager beginUndoGrouping];
+    
     NSPersistentStoreCoordinator *coordinator = context.persistentStoreCoordinator;
     NSManagedObjectModel *model = coordinator.managedObjectModel;
     
+    BOOL ok = YES;
+    NSError *err;
+    
     // first, clear the context
-    NSArray *entitites = [model entities];
-    for(NSEntityDescription *entity in entitites) {
-        @autoreleasepool {
-            NSArray *allObjects = ({
-                NSFetchRequest *fetchReq = [NSFetchRequest fetchRequestWithEntityName:[entity name]];
-                [context executeFetchRequest:fetchReq error:nil];
-            });
-            
-            for(NSManagedObject *obj in allObjects) {
-                [context deleteObject:obj];
-            }
-            
-            [context save:NULL];
-            [context reset]; // clear memory
-        }
-    }
-    
-    NSDictionary *decodedJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    
-    // first, decode the objects, and obtain permanent object IDs for them (as well as a mapping from import IDs
-    // to permanent IDs
-    NSMutableDictionary *importIDsToObjs = [NSMutableDictionary dictionaryWithCapacity:([entitites count] * 30)];
-    for(NSEntityDescription *entity in entitites) {
-        @autoreleasepool {
-            NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
-            NSUInteger c = [jsonItems count];
-            NSMutableArray *objs = [NSMutableArray arrayWithCapacity:c];
-            
-            for(NSUInteger i=0; i < c; ++i) {
-                NSManagedObject *obj = [[NSManagedObject alloc] initWithEntity:entity insertIntoManagedObjectContext:context];
-                [objs addObject:obj];
-            }
-            
-            [context obtainPermanentIDsForObjects:objs error:nil];
-            
-            for(NSUInteger i=0; i < c; ++i) {
-                NSDictionary *jsonItem = [jsonItems objectAtIndex:i];
-                NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
-                [importIDsToObjs setObject:[objs objectAtIndex:i] forKey:objIDString];
-            }
-        }
-    }
-    
-    for(NSEntityDescription *entity in entitites) {
-        @autoreleasepool {
-            NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
-            for(NSDictionary *jsonItem in jsonItems) {
-                NSString *objIDString   = [jsonItem objectForKey:kObjectIDKey];
-                NSDictionary *attrs     = [jsonItem objectForKey:kAttrsKey];
-                NSDictionary *relations = [jsonItem objectForKey:kRelationshipsKey];
-                NSManagedObject *obj = [importIDsToObjs objectForKey:objIDString];
+//    @try {
+        {
+        NSArray *entities = [model entities];
+        for(NSEntityDescription *entity in entities) {
+            @autoreleasepool {
+                NSArray *allObjects = ({
+                    NSFetchRequest *fetchReq = [NSFetchRequest fetchRequestWithEntityName:[entity name]];
+                    [context executeFetchRequest:fetchReq error:nil];
+                });
                 
-                for(NSString *attrName in attrs) {
-                    id attr = [attrs objectForKey:attrName];
-                    if(attr == [NSNull null]) {
-                        [obj setValue:nil forKey:attrName];
-                    }
-                    else if([attr isKindOfClass:[NSDictionary class]]) {
-                        NSNumber *val = [(NSDictionary *)attr objectForKey:kValueKey];
-                        NSAssert([[(NSDictionary *)val objectForKey:kClassKey] isEqualToString:@"NSDate"], @"Wrong class in attribute!");
-                        NSDate *d = [NSDate dateWithTimeIntervalSinceReferenceDate:[val floatValue]];
-                        [obj setValue:d forKey:attrName];
-                    }
-                    else {
-                        [obj setValue:attr forKey:attrName];
-                    }
+                for(NSManagedObject *obj in allObjects) {
+                    [context deleteObject:obj];
                 }
                 
-                for(NSString *relationshipName in relations) {
-                    NSDictionary *relation = [relations objectForKey:relationshipName];
-                    if([relation objectForKey:kItemKey] != nil) { // to-one relationship
-                        NSString *targetItemObjID = [relation objectForKey:kItemKey];
-                        [obj setValue:[importIDsToObjs objectForKey:targetItemObjID] forKey:relationshipName];
+                // TODO: find a way to save after each entity.
+                //            ok = [context save:&err];
+                //            if(! ok) break;
+                //            [context reset]; // clear memory
+            }
+        }
+        
+        ok = [context save:&err];
+        
+        if(! ok) {
+            [context reset];
+            return NO;
+        }
+        
+        NSDictionary *decodedJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            
+#ifdef DEBUG
+            // include extra resilience wrt problems in exported file?
+#define EXTRA_RESILIENCE 1
+#endif
+        
+        // first, decode the objects, and obtain permanent object IDs for them (as well as a mapping from import IDs
+        // to permanent IDs
+        NSMutableDictionary *importIDsToObjs = [NSMutableDictionary dictionaryWithCapacity:([entities count] * 30)];
+        for(NSEntityDescription *entity in entities) {
+            @autoreleasepool {
+                NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
+                NSUInteger c = [jsonItems count];
+                NSMutableArray *objs = [NSMutableArray arrayWithCapacity:c];
+                
+                for(NSUInteger i=0; i < c; ++i) {
+#ifdef EXTRA_RESILIENCE
+                    NSDictionary *jsonItem = [jsonItems objectAtIndex:i];
+                    NSString *entName = [[[jsonItem objectForKey:kObjectIDKey] pathComponents] objectAtIndex:1];
+                    if([entName isEqualToString:[entity name]]) {
+                        NSManagedObject *obj = [[NSManagedObject alloc] initWithEntity:entity insertIntoManagedObjectContext:context];
+                        [objs addObject:obj];
                     }
-                    else {
-                        NSArray *relationItems = [relation objectForKey:kItemsKey];
-                        NSAssert(relationItems != nil, @"Missing target items");
-                        NSMutableSet *targetSet = [obj mutableSetValueForKey:relationshipName];
-                        for(NSString *targetItemObjID in relationItems) {
-                            [targetSet addObject:[importIDsToObjs objectForKey:targetItemObjID]];
+#else
+                    NSManagedObject *obj = [[NSManagedObject alloc] initWithEntity:entity insertIntoManagedObjectContext:context];
+                    [objs addObject:obj];
+#endif
+                }
+                
+                [context obtainPermanentIDsForObjects:objs error:nil];
+                
+#ifdef EXTRA_RESILIENCE
+                NSUInteger j = 0;
+#endif
+                for(NSUInteger i=0; i < c; ++i) {
+                    NSDictionary *jsonItem = [jsonItems objectAtIndex:i];
+#ifdef EXTRA_RESILIENCE
+                    NSString *entName = [[[jsonItem objectForKey:kObjectIDKey] pathComponents] objectAtIndex:1];
+                    if([entName isEqualToString:[entity name]]) {
+                        NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
+                        [importIDsToObjs setObject:[objs objectAtIndex:j] forKey:objIDString];
+                        j++;
+                    }
+#else
+                    NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
+                    [importIDsToObjs setObject:[objs objectAtIndex:i] forKey:objIDString];
+#endif
+                }
+            }
+        }
+            
+        for(NSEntityDescription *entity in entities) {
+            @autoreleasepool {
+                NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
+                for(NSDictionary *jsonItem in jsonItems) {
+                    NSString *objIDString   = [jsonItem objectForKey:kObjectIDKey];
+                    NSDictionary *attrs     = [jsonItem objectForKey:kAttrsKey];
+                    NSDictionary *relations = [jsonItem objectForKey:kRelationshipsKey];
+                    NSManagedObject *obj = [importIDsToObjs objectForKey:objIDString];
+                    
+                    for(NSString *attrName in attrs) {
+                        id attr = [attrs objectForKey:attrName];
+                        if(attr == [NSNull null]) {
+                            [obj setValue:nil forKey:attrName];
+                        }
+                        else if([attr isKindOfClass:[NSDictionary class]]) {
+                            id val = [(NSDictionary *)attr objectForKey:kValueKey];
+                            if([(NSDictionary *)attr objectForKey:kClassKey] == nil) {
+                                NSData *dat = [NSData dataFromBase64String:((NSString *)val)];
+                                NSAttributeDescription *attrDescr = (NSAttributeDescription *)[[entity attributesByName] objectForKey:attrName];
+                                NSAssert([attrDescr attributeType] == NSTransformableAttributeType, @"Encoded data is not valid!");
+                                NSValueTransformer *transformer = ({
+                                    NSString *transformerName = [attrDescr valueTransformerName];
+                                    (transformerName == nil ? [[CodingValueTransformer alloc] init] : [NSValueTransformer valueTransformerForName:transformerName]);
+                                });
+                                id decodedVal = [transformer reverseTransformedValue:dat];
+                                [obj setValue:decodedVal forKey:attrName];
+                            }
+                            else if([[(NSDictionary *)attr objectForKey:kClassKey] isEqualToString:@"NSDate"]) {
+                                NSDate *d = [NSDate dateWithTimeIntervalSinceReferenceDate:[(NSNumber *)val floatValue]];
+                                [obj setValue:d forKey:attrName];
+                            }
+                            else if([[(NSDictionary *)attr objectForKey:kClassKey] isEqualToString:@"NSData"]) {
+                                NSData *dat = [NSData dataFromBase64String:((NSString *)val)];
+                                [obj setValue:dat forKey:attrName];
+                            }
+                        }
+                        else {
+                            [obj setValue:attr forKey:attrName];
+                        }
+                    }
+                    
+                    for(NSString *relationshipName in relations) {
+                        id relation = [relations objectForKey:relationshipName];
+                        if(relation != [NSNull null]) {
+                            NSDictionary *relationDict = relation;
+                            if([relationDict objectForKey:kItemKey] != nil) { // to-one relationship
+                                NSString *targetItemObjID = [relationDict objectForKey:kItemKey];
+                                [obj setValue:[importIDsToObjs objectForKey:targetItemObjID] forKey:relationshipName];
+                            }
+                            else {
+                                if([[relationDict objectForKey:kEntityKey] isEqualToString:[entity name]]) {
+                                    NSArray *relationItems = [relationDict objectForKey:kItemsKey];
+                                    NSAssert(relationItems != nil, @"Missing target items");
+                                    NSMutableSet *targetSet = [obj mutableSetValueForKey:relationshipName];
+                                    for(NSString *targetItemObjID in relationItems) {
+                                        id targetObject = [importIDsToObjs objectForKey:targetItemObjID];
+                                        [targetSet addObject:targetObject];
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+        
+        ok = [context save:nil];
+        if(! ok) {
+            [context reset];
+            return NO;
+        }
+        
+        [context.undoManager endUndoGrouping];
+        context.undoManager = nil;
     }
+//    @catch (NSException *exception) {
+//        [context.undoManager endUndoGrouping]; // we get there only if the previous block failed, and hence the undo grouping was not ended.
+//        [context undo];
+//    }
     
-    [context save:nil];
+    return YES;
 }
 
 @end
