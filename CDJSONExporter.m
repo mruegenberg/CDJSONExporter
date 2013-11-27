@@ -185,8 +185,8 @@ static NSString *kRelationshipsKey = @"Rels";
     NSError *err;
     
     // first, clear the context
-//    @try {
-        {
+    //    @try {
+    {
         NSArray *entities = [model entities];
         for(NSEntityDescription *entity in entities) {
             @autoreleasepool {
@@ -216,7 +216,7 @@ static NSString *kRelationshipsKey = @"Rels";
         NSDictionary *decodedJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             
 #ifdef DEBUG
-            // include extra resilience wrt problems in exported file?
+        // include extra resilience wrt problems in exported file?
 #define EXTRA_RESILIENCE 1
 #endif
         
@@ -254,8 +254,18 @@ static NSString *kRelationshipsKey = @"Rels";
                     NSString *entName = [[[jsonItem objectForKey:kObjectIDKey] pathComponents] objectAtIndex:1];
                     if([entName isEqualToString:[entity name]]) {
                         NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
-                        [importIDsToObjs setObject:[objs objectAtIndex:j] forKey:objIDString];
-                        j++;
+                        if([importIDsToObjs objectForKey:objIDString] != nil) {
+                            // is the new entity a subentity of the one that is already there?
+                            if([entity isKindOfEntity:[[importIDsToObjs objectForKey:objIDString] entity]]) {
+                                [context deleteObject:[importIDsToObjs objectForKey:objIDString]]; // replace it
+                                [importIDsToObjs setObject:[objs objectAtIndex:j] forKey:objIDString];
+                                j++;
+                            }
+                        }
+                        else {
+                            [importIDsToObjs setObject:[objs objectAtIndex:j] forKey:objIDString];
+                            j++;
+                        }
                     }
 #else
                     NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
@@ -340,6 +350,8 @@ static NSString *kRelationshipsKey = @"Rels";
         [context.undoManager endUndoGrouping];
         context.undoManager = nil;
     }
+    // catch all exceptions and restore the data store state to what it was before.
+    // Note: this is one of the rare cases where catching all exceptions is a valid thing to do!
 //    @catch (NSException *exception) {
 //        [context.undoManager endUndoGrouping]; // we get there only if the previous block failed, and hence the undo grouping was not ended.
 //        [context undo];
