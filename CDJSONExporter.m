@@ -36,6 +36,9 @@ static NSString *kRelationshipsKey = @"Rels";
     //       in that case, it might also be possible to find a reconstruction ordering for the objects
     //       that doesn't require previous building of objects at all (or at least minimizes it),
     //       which can save memory when importing.
+    //       An optimization might be to serialize only those to-many relationships which do not have an inverse.
+    //       If this is done, care must be taken to still handle many-to-many relationships correctly
+    //       (which are, according to Apple's docs, supposed to always have an inverse).
     
     NSPersistentStoreCoordinator *coordinator = context.persistentStoreCoordinator;
     NSManagedObjectModel *model = coordinator.managedObjectModel;
@@ -73,11 +76,10 @@ static NSString *kRelationshipsKey = @"Rels";
                                                   kClassKey:[(NSAttributeDescription *)property attributeValueClassName]}
                                          forKey:[property name]];
                             }
-#warning Not yet supported in unpacking:
                             else if(attrType == NSBinaryDataAttributeType) {
                                 NSData *dat = (NSData *)val;
                                 NSString *klassName = [(NSAttributeDescription *)property attributeValueClassName];
-                                if(klassName == nil) klassName = @"NSData"; // FIXME: not tested whether this is needed.
+                                if(klassName == nil) klassName = @"NSData"; // TODO: not tested whether this is needed.
                                 [attrs setValue:@{kValueKey:[dat base64EncodedString],
                                                   kClassKey:klassName}
                                          forKey:[property name]];
