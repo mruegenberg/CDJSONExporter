@@ -176,61 +176,56 @@ static NSString *kRelationshipsKey = @"Rels";
     // TODO: some kind of optional merge facility if `clearContext` == NO
     //       i.e we want to be able to merge items based on something different than object IDs
     
-    // set an undo manager in order to be more resilient wrt errors
-    [context setUndoManager:[[NSUndoManager alloc] init]];
-    [context.undoManager beginUndoGrouping];
-    
     NSPersistentStoreCoordinator *coordinator = context.persistentStoreCoordinator;
     NSManagedObjectModel *model = coordinator.managedObjectModel;
+    NSArray *entities = [model entities];
     
-    BOOL ok = YES;
-    NSError *err;
+    // We store the object IDs of objects to be deleted before doing any importing.
+    // Deletion then only happens if the import was successful.
+    NSMutableArray *deletionObjectIDs = [NSMutableArray arrayWithCapacity:(clearContext ? [[model entities] count] * 20 : 0)];
     
-    // first, clear the context
-    //    @try {
-    {
-        NSArray *entities = [model entities];
+    if(clearContext) {
         for(NSEntityDescription *entity in entities) {
             @autoreleasepool {
                 NSArray *allObjects = ({
                     NSFetchRequest *fetchReq = [NSFetchRequest fetchRequestWithEntityName:[entity name]];
+                    fetchReq.includesPropertyValues = NO;
+                    fetchReq.includesSubentities = NO; // we're doing deletion on all entities, so no need for subentitites
                     [context executeFetchRequest:fetchReq error:nil];
                 });
                 
                 for(NSManagedObject *obj in allObjects) {
-                    [context deleteObject:obj];
+                    [deletionObjectIDs addObject:[obj objectID]];
                 }
-                
-                // TODO: find a way to save after each entity.
-                //            ok = [context save:&err];
-                //            if(! ok) break;
-                //            [context reset]; // clear memory
             }
         }
-        
-        ok = [context save:&err];
-        
-        if(! ok) {
-            [context reset];
-            return NO;
-        }
-        
-        NSDictionary *decodedJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            
+        // [context reset]; // saves memory, but is not always save. it might be possible to use a sub-managed object context to get safety and memory savings
+    }
+    
+    BOOL ok = YES;
+    NSError *err;
+    
 #ifdef DEBUG
-        // include extra resilience wrt problems in exported file?
+    // include extra resilience wrt problems in exported file?
+    // extra resilience is more memory-hungry, but contains additional tests and has the
+    // but has the advantage of not changing the existing data if there are problems during import
 #define EXTRA_RESILIENCE 1
 #endif
-        
-        // first, decode the objects, and obtain permanent object IDs for them (as well as a mapping from import IDs
-        // to permanent IDs
-        NSMutableDictionary *importIDsToObjs = [NSMutableDictionary dictionaryWithCapacity:([entities count] * 30)];
+    
+    // decode objects to be imported
+    NSDictionary *decodedJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    
+    {
+        // first, decode the objects, obtain permanent object IDs for them
+        // and map from import IDs to permanent IDs
+        NSMutableDictionary *importIDsToObjs = [NSMutableDictionary dictionaryWithCapacity:([entities count] * 20)];
         for(NSEntityDescription *entity in entities) {
             @autoreleasepool {
                 NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
                 NSUInteger c = [jsonItems count];
                 NSMutableArray *objs = [NSMutableArray arrayWithCapacity:c];
                 
+                // create objects and obtain permanent IDs
                 for(NSUInteger i=0; i < c; ++i) {
 #ifdef EXTRA_RESILIENCE
                     NSDictionary *jsonItem = [jsonItems objectAtIndex:i];
@@ -247,12 +242,15 @@ static NSString *kRelationshipsKey = @"Rels";
                 
                 [context obtainPermanentIDsForObjects:objs error:nil];
                 
+                // add the mappings from existing IDs to permanent IDs to the map:
 #ifdef EXTRA_RESILIENCE
                 NSUInteger j = 0;
 #endif
                 for(NSUInteger i=0; i < c; ++i) {
                     NSDictionary *jsonItem = [jsonItems objectAtIndex:i];
 #ifdef EXTRA_RESILIENCE
+                    // ensure that the entity of the object is correct
+                    // and if not, delete it.
                     NSString *entName = [[[jsonItem objectForKey:kObjectIDKey] pathComponents] objectAtIndex:1];
                     if([entName isEqualToString:[entity name]]) {
                         NSString *objIDString = [jsonItem objectForKey:kObjectIDKey];
@@ -276,7 +274,9 @@ static NSString *kRelationshipsKey = @"Rels";
                 }
             }
         }
-            
+        
+        // unpack the objects
+        // TODO: find a way to save after unpacking each entity, thus saving memory
         for(NSEntityDescription *entity in entities) {
             @autoreleasepool {
                 NSArray *jsonItems = [decodedJSON objectForKey:[entity name]];
@@ -343,23 +343,27 @@ static NSString *kRelationshipsKey = @"Rels";
             }
         }
         
-        ok = [context save:nil];
+        ok = [context save:&err];
         if(! ok) {
             [context reset];
             return NO;
         }
-        
-        [context.undoManager endUndoGrouping];
-        context.undoManager = nil;
     }
-    // catch all exceptions and restore the data store state to what it was before.
-    // Note: this is one of the rare cases where catching all exceptions is a valid thing to do!
-//    @catch (NSException *exception) {
-//        [context.undoManager endUndoGrouping]; // we get there only if the previous block failed, and hence the undo grouping was not ended.
-//        [context undo];
-//    }
     
-    return YES;
+    if(ok) {
+        for(NSManagedObjectID *objID in deletionObjectIDs) {
+            NSManagedObject *obj = [context objectWithID:objID];
+            [context deleteObject:obj];
+        }
+        
+        ok = [context save:&err];
+        if(! ok) {
+            [context reset];
+            return NO;
+        }
+    }
+    
+    return ok;
 }
 
 @end
