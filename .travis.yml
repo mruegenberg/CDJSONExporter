@@ -1,0 +1,13 @@
+language: objective-c
+
+compiler:
+  - clang
+
+before_script:
+  - cd tests/CDJSONExporterTest
+  - echo "platform :ios, '5.0'" >> Podfile
+  - echo "" >> Podfile
+  - echo "pod 'NSData+Base64'" >> Podfile
+  - pod install
+
+script: xcodebuild -workspace CDJSONExporterTest.xcworkspace/ -scheme CDJSONExporterTest
