@@ -42,3 +42,5 @@ Afterwards, you can handle data with this extension in your app delegate:
 Known Issues
 ------------
 The memory use of this code is not optimal. The main reason is the inability of Core Data to ever save invalid objects. This is usually a good thing, but prevents the code from persisting changes while importing.
+
+![Travis CI build status](https://api.travis-ci.org/mruegenberg/CDJSONExporter.png)
