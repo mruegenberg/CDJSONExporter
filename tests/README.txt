@@ -1,1 +1,0 @@
-The directory is exclusively for the automatic build test. Look at `../README.md` for installation instructions for the library.
