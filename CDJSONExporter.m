@@ -350,20 +350,17 @@ static NSString *kRelationshipsKey = @"Rels";
         }
     }
     
-    if(ok) {
-        for(NSManagedObjectID *objID in deletionObjectIDs) {
-            NSManagedObject *obj = [context objectWithID:objID];
-            [context deleteObject:obj];
-        }
-        
-        ok = [context save:&err];
-        if(! ok) {
-            [context reset];
-            return NO;
-        }
+    for(NSManagedObjectID *objID in deletionObjectIDs) {
+        NSManagedObject *obj = [context objectWithID:objID];
+        [context deleteObject:obj];
     }
     
-    return ok;
+    ok = [context save:&err];
+    if(! ok) {
+        [context reset];
+    }
+	
+	return ok;
 }
 
 @end
