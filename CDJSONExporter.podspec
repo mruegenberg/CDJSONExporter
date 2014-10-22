@@ -16,7 +16,8 @@ Pod::Spec.new do |s|
 
   s.author       = { "Marcel Ruegenberg" => "gh@dustlab.com" }
 
-  s.platform     = :ios, '5.0'
+  s.ios.platform = :ios, "5.0"
+  s.osx.platform = :osx, "10.7"
 
   s.source       = { :git => "https://github.com/mruegenberg/CDJSONExporter.git", :tag => s.version }
 
